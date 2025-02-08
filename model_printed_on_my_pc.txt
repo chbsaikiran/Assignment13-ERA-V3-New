@@ -1,0 +1,57 @@
+LlamaForTraining(
+  (model): LlamaModel(
+    (token_position_embeddings): PipelineBlock(
+      (pp_block): Embedding(
+        (token_embedding): TensorParallelEmbedding(
+          (embedding): Embedding(49152, 576)
+        )
+      )
+    )
+    (decoder): ModuleList(
+      (0-29): 30 x PipelineBlock(
+        (pp_block): LlamaDecoderLayer(
+          (input_layernorm): TritonRMSNorm()
+          (attn): CausalSelfAttention(
+            (qkv_proj): TensorParallelColumnLinear(
+              (linear): Linear(in_features=576, out_features=960, bias=False)
+            )
+            (rotary_embedding): LlamaRotaryEmbedding()
+            (flash_rotary_embedding): RotaryEmbedding()
+            (o_proj): TensorParallelRowLinear(
+              (linear): Linear(in_features=576, out_features=576, bias=False)
+            )
+            (attention): CoreAttention()
+          )
+          (post_attention_layernorm): TritonRMSNorm()
+          (mlp): MLP(
+            (gate_up_proj): TensorParallelColumnLinear(
+              (linear): Linear(in_features=576, out_features=3072, bias=False)
+            )
+            (down_proj): TensorParallelRowLinear(
+              (linear): Linear(in_features=1536, out_features=576, bias=False)
+            )
+            (split_silu_mul): GLUActivation(
+              (act): SiLUActivation(
+                (silu): SiLU()
+              )
+            )
+          )
+        )
+      )
+    )
+    (final_layer_norm): PipelineBlock(
+      (pp_block): TritonRMSNorm()
+    )
+    (lm_head): PipelineBlock(
+      (pp_block): TensorParallelColumnLinear(
+        (linear): Linear(in_features=576, out_features=49152, bias=False)
+      )
+    )
+    (cast_to_fp32): PipelineBlock()
+  )
+  (loss): PipelineBlock(
+    (pp_block): Loss(
+      (loss_fn): CrossEntropyLoss()
+    )
+  )
+)

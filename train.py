@@ -11,37 +11,6 @@ from torch.optim import AdamW
 # Import the LlamaModel from model_manual.py
 from model import LlamaForCausalLM
 
-#def generate_text(model, input_text, vocab, id_to_token, device, max_length=50, temperature=0.7):
-#    model.eval()
-#    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/cosmo2-tokenizer")
-#    if tokenizer.pad_token is None:
-#        if tokenizer.eos_token:
-#            tokenizer.pad_token = tokenizer.eos_token
-#        else:
-#            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-#            tokenizer.resize_token_embeddings(len(tokenizer))
-#
-#    input_ids = tokenizer(input_text, return_tensors='pt', padding=True, truncation=True).input_ids.to(device)
-#    attention_mask = torch.ones_like(input_ids, dtype=torch.long).to(device)
-#    generated_tokens = input_ids.tolist()[0]
-#
-#    with torch.no_grad():
-#        for _ in range(max_length):
-#            logits = model(input_ids)[:, -1, :]
-#            logits = logits / temperature
-#            probabilities = F.softmax(logits, dim=-1)
-#            probabilities = probabilities[-1]
-#            next_token = torch.multinomial(probabilities, num_samples=1).item()
-#
-#            if next_token == tokenizer.eos_token_id:
-#                break
-#
-#            generated_tokens.append(next_token)
-#            input_ids = torch.tensor([generated_tokens], dtype=torch.long).to(device)
-#            attention_mask = torch.ones_like(input_ids, dtype=torch.long).to(device)
-#
-#    model.train()
-#    return tokenizer.decode(generated_tokens, skip_special_tokens=True)
 def generate_text(
     model, prompt, max_length=50, temperature=0.7, top_k=50
 ):
@@ -147,7 +116,7 @@ def print_model_parameters(model):
     for name, param in model.named_parameters():
         print(f"{name}: {param.numel():,}")
 
-def train_model(config, train_file, steps, output_dir):
+def train_model(config, train_file, steps, output_dir, resume_from_checkpoint=None):
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/cosmo2-tokenizer")
 
     if tokenizer.pad_token is None:
@@ -161,17 +130,8 @@ def train_model(config, train_file, steps, output_dir):
     id_to_token = {v: k for k, v in vocab.items()}
 
     dataloader = DataloaderLite(train_file, SEQ_LEN, BATCH_SIZE)
-    #padded_chunks = dataloader.next_batch()
-    #print(padded_chunks[0])
-    #print(padded_chunks[1])
-    #print(padded_chunks[2])
-    #print(padded_chunks[3])
 
     model = LlamaForCausalLM(config)
-    model.apply(init_weights)
-    #for p in model.parameters():
-    #    p.data.clamp_(-1e5, 1e5)
-    #print_model_parameters(model)
     model.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     model.device = next(model.parameters()).device
     
@@ -179,13 +139,32 @@ def train_model(config, train_file, steps, output_dir):
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
     
     lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    optimizer,
-    max_lr=LEARNING_RATE,
-    total_steps=10000,
-    pct_start=0.1,
-    anneal_strategy="cos",
-    cycle_momentum=False,
+        optimizer,
+        max_lr=LEARNING_RATE,
+        total_steps=10000,
+        pct_start=0.1,
+        anneal_strategy="cos",
+        cycle_momentum=False,
     )
+    
+    # Check if resuming from a checkpoint
+    start_step = 0
+    if resume_from_checkpoint:
+        try:
+            checkpoint = torch.load(resume_from_checkpoint)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_step = checkpoint['step']
+            print(f"Resuming training from step {start_step}")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            print("Starting training from scratch")
+    else:
+        # If not resuming, apply initial weight initialization
+        model.apply(init_weights)
+    
+    print_model_parameters(model)
     
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -194,8 +173,8 @@ def train_model(config, train_file, steps, output_dir):
     
     PROMPT = "inventory to particularise their abundance"
     
-    step = 0
-    while step < steps:
+    step = start_step
+    while step < start_step + steps:
         input_tokens = dataloader.next_batch()
         max_len = dataloader.get_max_length()
         input_list = []
@@ -204,41 +183,28 @@ def train_model(config, train_file, steps, output_dir):
             input_list.append(input_tokens[2*i])
             attenttion_list.append(input_tokens[2*i+1])
     
-        #print(input_list[0].shape)
         input_ids = torch.vstack(input_list)
-        #print(input_ids.shape)
         inputs = input_ids[:, :-2]  # Keep batch dim and remove last token
         targets = input_ids[:, 1:-1]  # Keep batch dim and remove first token
-        #print(inputs[:3,:])
-        #print(inputs.shape)
+        
         attention_mask = torch.vstack(attenttion_list)
         attentions = attention_mask[:, :-2]
         device = next(model.parameters()).device
         inputs, attentions = inputs.to(device), attentions.to(device)
-        #positions = torch.arange(0, inputs.size(1), dtype=torch.long).unsqueeze(0).repeat(inputs.size(0), 1).to(device)
-        #print(inputs.shape)
-        #print(attentions.shape)
-        #print(positions.shape)
         
         optimizer.zero_grad()
         logits = model(inputs)
         
         labels = targets.to(device)  # Move labels to the same device as the model and inputs
-        # Create a mask based on counts
         mask = attentions.bool()  # The attention mask already has the correct shape
-        #logits = logits.transpose(0, 1)  # Align logits to (batch_size, seq_len, vocab_size)
+        
         logits_masked = logits[mask].contiguous().view(-1, config.vocab_size)
         labels_masked = labels[mask].contiguous().view(-1)
-        probabilities = F.softmax(logits_masked, dim=-1)
-        max_prob_indices = torch.argmax(probabilities, dim=-1)
-        #print(max_prob_indices[:10])
-        #print(labels_masked[:10])
         
         if mask.sum() == 0:
             raise ValueError("Attention mask sums to zero!")
         
         loss_cross_entropy = F.cross_entropy(logits_masked, labels_masked, label_smoothing=0.1)
-        #loss = loss_fn(logits_masked, labels_masked)
         
         loss_cross_entropy.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -248,37 +214,35 @@ def train_model(config, train_file, steps, output_dir):
         progress_bar.update(1)
         progress_bar.set_postfix(loss=loss_cross_entropy.item(), refresh=True)
         
-        if step % 250 == 0:
+        if (step - start_step) % 250 == 0:
             torch.save({
                 'step': step,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': lr_scheduler.state_dict()
             }, os.path.join(output_dir, f'checkpoint.pt'))
-            progress_bar.clear()  # Clear progress bar before printing text
-            #generated_text = generate_text(model, PROMPT, vocab, id_to_token, model.device)
+            progress_bar.clear()
+            
             generated_text = generate_text(
                             model,
                             PROMPT,
                             temperature=0.7,
-                            max_length=100,  # Increased max length
-                        )
-            print(f"Generated text at step {step}: {generated_text}")  # Use print to avoid tqdm interference
-            progress_bar.refresh()  # Refresh the progress bar after printing
-        
+                            max_length=100,
+            )
+            print(f"Generated text at step {step}: {generated_text}")
+            progress_bar.refresh()
         
         step += 1
-        if step >= steps:
-            break
     
+    # Save final checkpoint
     torch.save({
-                'step': step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': lr_scheduler.state_dict()
-            }, os.path.join(output_dir, f'checkpoint.pt'))
+        'step': step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': lr_scheduler.state_dict()
+    }, os.path.join(output_dir, f'checkpoint.pt'))
     
-    progress_bar.close()  # Ensure the progress bar closes cleanly
+    progress_bar.close()
 
 class Config:
     pass
@@ -295,11 +259,16 @@ if __name__ == "__main__":
     config.hidden_act = False
     config.intermediate_size = 1536
     config.rope_interleaved = False
-    #config.rope_scaling = null
     config.rope_theta = 10000.0
 
     BATCH_SIZE = 8
     SEQ_LEN = 256
 
-    train_model(config, '/kaggle/input/assign13-era-v3-dataset/input.txt', 5000, './output')
-    #train_model(config, '/content/input.txt', 5000, './output')
+    # Resume training from the checkpoint
+    train_model(
+        config, 
+        '/kaggle/input/assign13-era-v3-dataset/input.txt', 
+        50,  # Number of additional steps
+        './output', 
+        resume_from_checkpoint='./output/checkpoint.pt'
+    )
